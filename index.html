@@ -1,0 +1,1484 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>SVM Explorer | XR Blocks</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <link
+      type="text/css"
+      rel="stylesheet"
+      href="https://xrblocks.github.io/css/xr.css"
+    />
+    <script>
+      window.litDisableBundleWarning = true;
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+          "three/": "https://cdn.jsdelivr.net/npm/three@0.184.0/",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/",
+          "@pmndrs/uikit": "https://cdn.jsdelivr.net/npm/@pmndrs/uikit@1.0.64/dist/index.min.js",
+          "@pmndrs/uikit-pub-sub": "https://cdn.jsdelivr.net/npm/@pmndrs/uikit-pub-sub@1.0.64/dist/index.min.js",
+          "@pmndrs/msdfonts": "https://cdn.jsdelivr.net/npm/@pmndrs/msdfonts@1.0.64/dist/index.min.js",
+          "@preact/signals-core": "https://cdn.jsdelivr.net/npm/@preact/signals-core@1.14.0/dist/signals-core.mjs",
+          "yoga-layout/load": "https://cdn.jsdelivr.net/npm/yoga-layout@3.2.1/dist/src/load.js",
+          "lit": "https://esm.sh/lit@3.3.1",
+          "lit/": "https://esm.sh/lit@3.3.1/",
+          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.21.1/build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.21.1/build/addons/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from 'three';
+      import * as xb from 'xrblocks';
+
+      // Physical dimensions of the floating data box (meters)
+      const BOX_SIZE = 0.6;
+      const HALF_BOX = BOX_SIZE / 2;
+      const NUM_DOTS = 30;
+
+      // Lesson content in plain, beginner-friendly language
+      const LESSONS = [
+        {
+          title: 'Lesson 1: The goal — separate two groups',
+          body:
+            'Each dot is one example, such as an email. Red = spam, blue = not spam.\n' +
+            'An SVM looks for a flat sheet that keeps the two groups apart, so new dots can be sorted by which side they land on.',
+          tryThis:
+            'Try this: Walk around the box and look at the two groups from all sides.',
+        },
+        {
+          title: 'Lesson 2: The best boundary has the widest gap',
+          body:
+            'Many sheets separate the groups, but the SVM picks the one with the widest gap.\n' +
+            'A wide gap leaves room for error, so new dots are sorted more reliably.',
+          tryThis:
+            'Try this: Grab and tilt the boundary sheet (or use the sliders), then press "Show best boundary".',
+        },
+        {
+          title: 'Lesson 3: Support vectors — the dots that matter',
+          body:
+            'Only the dots closest to the boundary decide where it goes. These are called support vectors.\n' +
+            'Move a far-away dot: nothing changes. Move a support vector: the boundary shifts.',
+          tryThis:
+            'Try this: Pinch and drag a ringed dot vs. a far-away dot to see the boundary react.',
+        },
+        {
+          title: 'Lesson 4: The kernel trick — lift the data',
+          body:
+            'Sometimes no flat sheet can separate the groups. The trick: add a new dimension.\n' +
+            'Lifted into 3D, a flat sheet works. Seen from above, that sheet looks like a circle around the red dots.',
+          tryThis:
+            'Try this: Drag the "Lift" slider up to raise the outer blue ring above the red cluster.',
+        },
+      ];
+
+      /**
+       * Creates a crisp sprite badge reading "support vector" above highlighted dots.
+       */
+      function createSupportVectorBadge() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 320;
+        canvas.height = 72;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+        ctx.beginPath();
+        ctx.roundRect(8, 8, 304, 56, 28);
+        ctx.fill();
+        ctx.strokeStyle = '#fde047';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        ctx.fillStyle = '#fef08a';
+        ctx.font = 'bold 28px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('support vector', 160, 37);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const mat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthTest: false,
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(0.16, 0.036, 1);
+        sprite.position.set(0, 0.038, 0);
+        sprite.xb = { pointerEvents: 'none' };
+        return sprite;
+      }
+
+      class SVMExplorer extends xb.Script {
+        constructor() {
+          super();
+          this.lessonIndex = 0;
+          this.started = false;
+
+          // Linear SVM parameters in local box coordinates [-0.3, 0.3]^3
+          this.svmW = new THREE.Vector3(1, 0.5, 0);
+          this.svmB = 0;
+
+          // Current displayed hyperplane parameters (can be user-controlled in Lesson 2)
+          this.curW = new THREE.Vector3(1, 0.5, 0);
+          this.curB = 0;
+
+          // Animation state for "Show best boundary"
+          this.animatingBest = false;
+          this.animTime = 0;
+          this.animDuration = 0.65;
+          this.animStartW = new THREE.Vector3();
+          this.animStartB = 0;
+          this.animTargetW = new THREE.Vector3();
+          this.animTargetB = 0;
+
+          // Manual orientation angles & offset for Lesson 2 sliders
+          this.manualTilt = 0;
+          this.manualTurn = 0;
+          this.manualSlide = 0;
+          this.syncingSliders = false;
+
+          // Kernel trick lift factor [0, 1] for Lesson 4
+          this.liftAmount = 0;
+
+          // Scene objects
+          this.dots = [];
+          this.hoveredObject = null;
+          this.grabbedDot = null;
+          this.grabbingBoundary = false;
+        }
+
+        init() {
+          // Soft ambient + directional lighting suitable for passthrough mixed reality
+          this.add(new THREE.HemisphereLight(0xffffff, 0x334155, 2.4));
+          const dirLight = new THREE.DirectionalLight(0xffffff, 1.8);
+          dirLight.position.set(0.8, 2.5, 1.5);
+          this.add(dirLight);
+
+          // 1. Build the central 0.6 m wireframe data box at chest height, 1.0 m in front
+          this.buildDataBox();
+
+          // 2. Build the boundary sheet and parallel gap (margin) sheets
+          this.buildBoundarySheets();
+
+          // 3. Create reusable pool of 30 interactive spheres (Group A red, Group B blue)
+          this.buildDotPool();
+
+          // 4. Build spatial UI panels: Welcome (centre), Controls (left), Lesson (right)
+          this.buildUI();
+
+          // 5. Generate initial dataset and configure Lesson 1 state
+          this.generateSeparableData();
+          this.trainSVM(2000, false);
+          this.applyLessonState(0, false);
+
+          // Show Welcome screen first; hide main workspace until "Start" is pressed
+          this.setMainWorkspaceVisible(false);
+          this.welcomeCard.visible = true;
+        }
+
+        buildDataBox() {
+          this.dataBox = new THREE.Group();
+          this.dataBox.position.set(0, 1.35, -1.0);
+          this.add(this.dataBox);
+
+          // Crisp wireframe edges
+          const boxGeo = new THREE.BoxGeometry(BOX_SIZE, BOX_SIZE, BOX_SIZE);
+          const edgesGeo = new THREE.EdgesGeometry(boxGeo);
+          const edgesMat = new THREE.LineBasicMaterial({
+            color: 0xe2e8f0,
+            transparent: true,
+            opacity: 0.75,
+          });
+          this.wireframeMesh = new THREE.LineSegments(edgesGeo, edgesMat);
+          this.wireframeMesh.xb = { pointerEvents: 'none' };
+          this.dataBox.add(this.wireframeMesh);
+
+          // Subtle corner ticks & floor grid inside box for depth perception over passthrough
+          const floorGrid = new THREE.GridHelper(
+            BOX_SIZE,
+            6,
+            0x94a3b8,
+            0x475569
+          );
+          floorGrid.position.y = -HALF_BOX;
+          floorGrid.material.transparent = true;
+          floorGrid.material.opacity = 0.25;
+          floorGrid.xb = { pointerEvents: 'none' };
+          this.dataBox.add(floorGrid);
+
+          boxGeo.dispose();
+        }
+
+        buildBoundarySheets() {
+          // Boundary sheet sized to sit comfortably within the 0.6 m box
+          const planeGeo = new THREE.PlaneGeometry(0.56, 0.56);
+
+          this.boundaryMaterial = new THREE.MeshStandardMaterial({
+            color: 0x22c55e,
+            emissive: 0x15803d,
+            emissiveIntensity: 0.35,
+            transparent: true,
+            opacity: 0.48,
+            side: THREE.DoubleSide,
+            roughness: 0.3,
+            depthWrite: false,
+          });
+
+          this.boundaryMesh = new THREE.Mesh(planeGeo, this.boundaryMaterial);
+          this.boundaryMesh.name = 'Boundary sheet';
+          this.boundaryMesh.xb = {
+            manipulation: true,
+            pointerEvents: 'auto',
+            reticleMode: 'auto',
+          };
+          this.dataBox.add(this.boundaryMesh);
+
+          // Faint border outline on the boundary sheet for high visibility
+          const borderGeo = new THREE.EdgesGeometry(planeGeo);
+          this.boundaryBorder = new THREE.LineSegments(
+            borderGeo,
+            new THREE.LineBasicMaterial({ color: 0x86efac })
+          );
+          this.boundaryBorder.xb = { pointerEvents: 'none' };
+          this.boundaryMesh.add(this.boundaryBorder);
+
+          // Two parallel faint sheets showing the margin (gap edges)
+          const marginMat = new THREE.MeshBasicMaterial({
+            color: 0xf8fafc,
+            transparent: true,
+            opacity: 0.14,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+          const marginEdgeMat = new THREE.LineBasicMaterial({
+            color: 0xcbd5e1,
+            transparent: true,
+            opacity: 0.45,
+          });
+
+          this.marginPlusMesh = new THREE.Mesh(planeGeo, marginMat);
+          this.marginPlusMesh.xb = { pointerEvents: 'none' };
+          const edgePlus = new THREE.LineSegments(borderGeo, marginEdgeMat);
+          edgePlus.xb = { pointerEvents: 'none' };
+          this.marginPlusMesh.add(edgePlus);
+          this.dataBox.add(this.marginPlusMesh);
+
+          this.marginMinusMesh = new THREE.Mesh(planeGeo, marginMat);
+          this.marginMinusMesh.xb = { pointerEvents: 'none' };
+          const edgeMinus = new THREE.LineSegments(borderGeo, marginEdgeMat);
+          edgeMinus.xb = { pointerEvents: 'none' };
+          this.marginMinusMesh.add(edgeMinus);
+          this.dataBox.add(this.marginMinusMesh);
+        }
+
+        buildDotPool() {
+          const sphereGeo = new THREE.SphereGeometry(0.017, 24, 18);
+          const ringGeo = new THREE.TorusGeometry(0.026, 0.0032, 12, 32);
+
+          for (let i = 0; i < NUM_DOTS; i++) {
+            const label = i < NUM_DOTS / 2 ? 1 : -1; // +1 = Red (Group A), -1 = Blue (Group B)
+            const baseColor = label === 1 ? 0xef4444 : 0x3b82f6;
+            const emissiveColor = label === 1 ? 0x7f1d1d : 0x1e3a8a;
+
+            const mat = new THREE.MeshStandardMaterial({
+              color: baseColor,
+              emissive: emissiveColor,
+              emissiveIntensity: 0.35,
+              roughness: 0.25,
+              metalness: 0.1,
+            });
+
+            const mesh = new THREE.Mesh(sphereGeo, mat);
+            mesh.name = label === 1 ? `Red dot ${i + 1}` : `Blue dot ${i + 1}`;
+            mesh.xb = {
+              manipulation: true,
+              pointerEvents: 'auto',
+              reticleMode: 'auto',
+            };
+
+            // Glowing yellow halo ring for support vectors
+            const ringMat = new THREE.MeshBasicMaterial({
+              color: 0xfde047,
+              transparent: true,
+              opacity: 0.95,
+            });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.visible = false;
+            ring.xb = { pointerEvents: 'none' };
+            ring.add(new xb.FaceCamera({ mode: 'spherical', smoothing: 1 }));
+            mesh.add(ring);
+
+            // Floating "support vector" label
+            const badge = createSupportVectorBadge();
+            badge.visible = false;
+            mesh.add(badge);
+
+            const dotRecord = {
+              index: i,
+              label,
+              baseColor,
+              emissiveColor,
+              mesh,
+              ring,
+              badge,
+              // Base 3D coordinates inside [-0.25, 0.25]^3
+              pos: new THREE.Vector3(),
+              // Used in Lesson 4 for radial kernel lift
+              flatPos: new THREE.Vector3(),
+              radiusSq: 0,
+              isSupportVector: false,
+            };
+
+            mesh.userData.dotRecord = dotRecord;
+            this.dots.push(dotRecord);
+            this.dataBox.add(mesh);
+          }
+        }
+
+        buildUI() {
+          // --- WELCOME CARD (Centre, shown first) ---
+          const startBtn = new xb.UIButton({
+            label: 'Start',
+            icon: 'play_arrow',
+            style: {
+              width: '100%',
+              height: 54,
+              fontSize: 22,
+              fontWeight: 'bold',
+              backgroundColor: '#2563eb',
+            },
+            onClick: () => {
+              this.started = true;
+              this.welcomeCard.visible = false;
+              this.setMainWorkspaceVisible(true);
+            },
+          });
+
+          this.welcomeCard = new xb.UICard({
+            size: { width: 0.68, height: 'auto' },
+            manipulation: true,
+            edge: true,
+            style: {
+              flexDirection: 'column',
+              gap: 14,
+              padding: 24,
+              backgroundColor: 'rgba(15, 23, 42, 0.94)',
+            },
+            children: [
+              new xb.UIText({
+                text: 'Welcome to SVM Explorer',
+                style: {
+                  fontSize: 30,
+                  fontWeight: 'bold',
+                  textAlign: 'center',
+                  color: '#ffffff',
+                },
+              }),
+              new xb.UIText({
+                text: 'An SVM is a method computers use to separate two groups of things by drawing the best possible boundary between them.',
+                style: {
+                  fontSize: 18,
+                  lineHeight: 1.4,
+                  color: '#e2e8f0',
+                },
+              }),
+              new xb.UIPanel({
+                style: {
+                  width: '100%',
+                  flexDirection: 'column',
+                  gap: 8,
+                  padding: 14,
+                  borderRadius: 14,
+                  backgroundColor: 'rgba(255, 255, 255, 0.08)',
+                },
+                children: [
+                  new xb.UIText({
+                    text: 'How to use this app',
+                    style: {
+                      fontSize: 19,
+                      fontWeight: 'bold',
+                      color: '#93c5fd',
+                    },
+                  }),
+                  new xb.UIText({
+                    text: '1. Point at a button and pinch (or pull the controller trigger) to press it.',
+                    style: { fontSize: 16, lineHeight: 1.35, color: '#f8fafc' },
+                  }),
+                  new xb.UIText({
+                    text: '2. Pinch and hold an object to grab and move it.',
+                    style: { fontSize: 16, lineHeight: 1.35, color: '#f8fafc' },
+                  }),
+                  new xb.UIText({
+                    text: '3. Use Next and Back on the Lesson panel to move through 4 short lessons.',
+                    style: { fontSize: 16, lineHeight: 1.35, color: '#f8fafc' },
+                  }),
+                  new xb.UIText({
+                    text: '4. Press "?" at any time to see these instructions again.',
+                    style: { fontSize: 16, lineHeight: 1.35, color: '#f8fafc' },
+                  }),
+                ],
+              }),
+              startBtn,
+            ],
+          });
+          this.welcomeCard.position.set(0, 1.38, -0.95);
+          this.add(this.welcomeCard);
+
+          // --- CONTROLS PANEL (Left) ---
+          this.bestBtn = new xb.UIButton({
+            label: 'Show best boundary',
+            icon: 'auto_awesome',
+            style: { width: '100%', fontSize: 16 },
+            onClick: () => this.triggerBestBoundaryAnimation(),
+          });
+
+          this.newDataBtn = new xb.UIButton({
+            label: 'New random data',
+            icon: 'shuffle',
+            style: { width: '100%', fontSize: 16 },
+            onClick: () => this.handleNewRandomData(),
+          });
+
+          this.resetLessonBtn = new xb.UIButton({
+            label: 'Reset lesson',
+            icon: 'restart_alt',
+            style: { flexGrow: 1, fontSize: 16 },
+            onClick: () => this.applyLessonState(this.lessonIndex, true),
+          });
+
+          this.helpBtn = new xb.UIButton({
+            label: '?',
+            style: { width: 52, fontSize: 20, fontWeight: 'bold' },
+            onClick: () => {
+              this.welcomeCard.visible = !this.welcomeCard.visible;
+            },
+          });
+
+          // Lesson 2 Sliders (Tilt, Turn, Slide)
+          this.tiltValueText = new xb.UIText({
+            text: '0°',
+            style: { fontSize: 15, fontWeight: 'bold' },
+          });
+          this.tiltSlider = new xb.UISlider({
+            ariaLabel: 'Tilt boundary',
+            min: -75,
+            max: 75,
+            step: 1,
+            value: 0,
+            style: { width: '100%', height: 34 },
+            onInput: (val) => {
+              if (this.syncingSliders) return;
+              this.manualTilt = val;
+              this.tiltValueText.text = `${Math.round(val)}°`;
+              this.updatePlaneFromSliders();
+            },
+          });
+
+          this.turnValueText = new xb.UIText({
+            text: '0°',
+            style: { fontSize: 15, fontWeight: 'bold' },
+          });
+          this.turnSlider = new xb.UISlider({
+            ariaLabel: 'Turn boundary',
+            min: -90,
+            max: 90,
+            step: 1,
+            value: 0,
+            style: { width: '100%', height: 34 },
+            onInput: (val) => {
+              if (this.syncingSliders) return;
+              this.manualTurn = val;
+              this.turnValueText.text = `${Math.round(val)}°`;
+              this.updatePlaneFromSliders();
+            },
+          });
+
+          this.slideValueText = new xb.UIText({
+            text: '0 cm',
+            style: { fontSize: 15, fontWeight: 'bold' },
+          });
+          this.slideSlider = new xb.UISlider({
+            ariaLabel: 'Slide boundary',
+            min: -20,
+            max: 20,
+            step: 1,
+            value: 0,
+            style: { width: '100%', height: 34 },
+            onInput: (val) => {
+              if (this.syncingSliders) return;
+              this.manualSlide = val / 100;
+              this.slideValueText.text = `${Math.round(val)} cm`;
+              this.updatePlaneFromSliders();
+            },
+          });
+
+          this.lesson2SlidersPanel = new xb.UIPanel({
+            visible: false,
+            style: {
+              width: '100%',
+              flexDirection: 'column',
+              gap: 6,
+              padding: 10,
+              borderRadius: 12,
+              backgroundColor: 'rgba(255, 255, 255, 0.07)',
+            },
+            children: [
+              this.makeSliderRow('Tilt', this.tiltValueText),
+              this.tiltSlider,
+              this.makeSliderRow('Turn', this.turnValueText),
+              this.turnSlider,
+              this.makeSliderRow('Slide', this.slideValueText),
+              this.slideSlider,
+            ],
+          });
+
+          // Lesson 4 Lift Slider
+          this.liftValueText = new xb.UIText({
+            text: '0%',
+            style: { fontSize: 16, fontWeight: 'bold', color: '#fde047' },
+          });
+          this.liftSlider = new xb.UISlider({
+            ariaLabel: 'Lift data points',
+            min: 0,
+            max: 100,
+            step: 1,
+            value: 0,
+            style: { width: '100%', height: 38 },
+            onInput: (val) => {
+              this.liftAmount = val / 100;
+              this.liftValueText.text = `${Math.round(val)}%`;
+              this.updateKernelLift();
+            },
+          });
+
+          this.lesson4LiftPanel = new xb.UIPanel({
+            visible: false,
+            style: {
+              width: '100%',
+              flexDirection: 'column',
+              gap: 8,
+              padding: 12,
+              borderRadius: 12,
+              backgroundColor: 'rgba(59, 130, 246, 0.16)',
+            },
+            children: [
+              this.makeSliderRow('Lift into 3D', this.liftValueText),
+              this.liftSlider,
+            ],
+          });
+
+          // Legend Panel
+          const legendPanel = new xb.UIPanel({
+            style: {
+              width: '100%',
+              flexDirection: 'column',
+              gap: 5,
+              padding: 10,
+              borderRadius: 12,
+              backgroundColor: 'rgba(0, 0, 0, 0.35)',
+            },
+            children: [
+              new xb.UIText({
+                text: 'Legend',
+                style: { fontSize: 15, fontWeight: 'bold', color: '#cbd5e1' },
+              }),
+              this.makeLegendItem('#ef4444', 'Red dot = Group A'),
+              this.makeLegendItem('#3b82f6', 'Blue dot = Group B'),
+              this.makeLegendItem('#22c55e', 'Green sheet = boundary'),
+              this.makeLegendItem('#cbd5e1', 'Faint sheets = gap edges'),
+              this.makeLegendItem('#fde047', 'Ringed dot = support vector'),
+            ],
+          });
+
+          this.controlsCard = new xb.UICard({
+            size: { width: 0.44, height: 'auto' },
+            manipulation: true,
+            edge: true,
+            style: {
+              flexDirection: 'column',
+              gap: 10,
+              padding: 16,
+              backgroundColor: 'rgba(15, 23, 42, 0.90)',
+            },
+            children: [
+              new xb.UIText({
+                text: 'Controls',
+                style: {
+                  fontSize: 24,
+                  fontWeight: 'bold',
+                  textAlign: 'center',
+                  color: '#ffffff',
+                },
+              }),
+              this.bestBtn,
+              this.newDataBtn,
+              new xb.UIPanel({
+                style: { width: '100%', flexDirection: 'row', gap: 8 },
+                children: [this.resetLessonBtn, this.helpBtn],
+              }),
+              this.lesson2SlidersPanel,
+              this.lesson4LiftPanel,
+              legendPanel,
+            ],
+          });
+          this.controlsCard.position.set(-0.62, 1.36, -0.96);
+          this.controlsCard.rotation.y = 0.35;
+          this.add(this.controlsCard);
+
+          // --- LESSON PANEL (Right) ---
+          this.lessonTitleText = new xb.UIText({
+            text: LESSONS[0].title,
+            style: {
+              fontSize: 22,
+              fontWeight: 'bold',
+              lineHeight: 1.25,
+              color: '#ffffff',
+            },
+          });
+
+          this.lessonBodyText = new xb.UIText({
+            text: LESSONS[0].body,
+            style: {
+              fontSize: 16,
+              lineHeight: 1.4,
+              whiteSpace: 'pre-line',
+              color: '#e2e8f0',
+            },
+          });
+
+          // Live metrics box (used in Lessons 2 & 3)
+          this.liveMetricPrimary = new xb.UIText({
+            text: 'Gap width: 12.0 cm',
+            style: {
+              fontSize: 17,
+              fontWeight: 'bold',
+              color: '#86efac',
+            },
+          });
+
+          this.liveMetricSecondary = new xb.UIText({
+            text: 'Dots on the wrong side: 0',
+            style: {
+              fontSize: 16,
+              color: '#f8fafc',
+            },
+          });
+
+          this.liveMetricsPanel = new xb.UIPanel({
+            visible: false,
+            style: {
+              width: '100%',
+              flexDirection: 'column',
+              gap: 4,
+              padding: 10,
+              borderRadius: 10,
+              backgroundColor: 'rgba(255, 255, 255, 0.09)',
+            },
+            children: [this.liveMetricPrimary, this.liveMetricSecondary],
+          });
+
+          this.tryThisText = new xb.UIText({
+            text: LESSONS[0].tryThis,
+            style: {
+              fontSize: 15,
+              lineHeight: 1.35,
+              padding: 10,
+              borderRadius: 10,
+              backgroundColor: 'rgba(56, 189, 248, 0.16)',
+              color: '#bae6fd',
+            },
+          });
+
+          this.lessonIndicatorText = new xb.UIText({
+            text: 'Lesson 1 of 4',
+            style: {
+              fontSize: 15,
+              textAlign: 'center',
+              color: '#94a3b8',
+            },
+          });
+
+          this.backLessonBtn = new xb.UIButton({
+            label: 'Back',
+            icon: 'arrow_back',
+            style: { flexGrow: 1, fontSize: 16 },
+            onClick: () => {
+              if (this.lessonIndex > 0) {
+                this.applyLessonState(this.lessonIndex - 1, true);
+              }
+            },
+          });
+
+          this.nextLessonBtn = new xb.UIButton({
+            label: 'Next',
+            icon: 'arrow_forward',
+            style: { flexGrow: 1, fontSize: 16 },
+            onClick: () => {
+              if (this.lessonIndex < LESSONS.length - 1) {
+                this.applyLessonState(this.lessonIndex + 1, true);
+              }
+            },
+          });
+
+          this.lessonCard = new xb.UICard({
+            size: { width: 0.48, height: 'auto' },
+            manipulation: true,
+            edge: true,
+            style: {
+              flexDirection: 'column',
+              gap: 12,
+              padding: 18,
+              backgroundColor: 'rgba(15, 23, 42, 0.90)',
+            },
+            children: [
+              this.lessonTitleText,
+              this.lessonBodyText,
+              this.liveMetricsPanel,
+              this.tryThisText,
+              new xb.UIPanel({
+                style: { width: '100%', flexDirection: 'row', gap: 10 },
+                children: [this.backLessonBtn, this.nextLessonBtn],
+              }),
+              this.lessonIndicatorText,
+            ],
+          });
+          this.lessonCard.position.set(0.62, 1.36, -0.96);
+          this.lessonCard.rotation.y = -0.35;
+          this.add(this.lessonCard);
+        }
+
+        makeSliderRow(label, valueText) {
+          return new xb.UIPanel({
+            style: {
+              width: '100%',
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            },
+            children: [
+              new xb.UIText({
+                text: label,
+                style: { fontSize: 15, color: '#e2e8f0' },
+              }),
+              valueText,
+            ],
+          });
+        }
+
+        makeLegendItem(hexColor, text) {
+          return new xb.UIPanel({
+            style: {
+              width: '100%',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 8,
+            },
+            children: [
+              new xb.UIPanel({
+                style: {
+                  width: 12,
+                  height: 12,
+                  borderRadius: 6,
+                  backgroundColor: hexColor,
+                },
+              }),
+              new xb.UIText({
+                text,
+                style: { fontSize: 14, color: '#f1f5f9' },
+              }),
+            ],
+          });
+        }
+
+        setMainWorkspaceVisible(visible) {
+          this.dataBox.visible = visible;
+          this.controlsCard.visible = visible;
+          this.lessonCard.visible = visible;
+        }
+
+        /**
+         * Generates 30 linearly separable 3D points inside the 0.6 m box.
+         */
+        generateSeparableData() {
+          // Pick a random separating normal direction so every dataset feels fresh
+          const normal = new THREE.Vector3(
+            (Math.random() - 0.5) * 1.4,
+            0.6 + Math.random() * 0.8,
+            (Math.random() - 0.5) * 1.4
+          ).normalize();
+
+          // Build two orthonormal tangent vectors to spread clusters naturally
+          const helper =
+            Math.abs(normal.y) < 0.9
+              ? new THREE.Vector3(0, 1, 0)
+              : new THREE.Vector3(1, 0, 0);
+          const u = new THREE.Vector3().crossVectors(normal, helper).normalize();
+          const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+          const halfCount = NUM_DOTS / 2;
+          for (let i = 0; i < NUM_DOTS; i++) {
+            const dot = this.dots[i];
+            const isGroupA = dot.label === 1;
+            // Guaranteed minimum gap along the normal direction
+            const alongNormal =
+              (isGroupA ? 1 : -1) * (0.065 + Math.random() * 0.14);
+            const spreadU = (Math.random() - 0.5) * 0.34;
+            const spreadV = (Math.random() - 0.5) * 0.34;
+
+            dot.pos
+              .copy(normal)
+              .multiplyScalar(alongNormal)
+              .addScaledVector(u, spreadU)
+              .addScaledVector(v, spreadV);
+
+            // Clamp safely inside the 0.6 m cube
+            dot.pos.clampScalar(-0.24, 0.24);
+            dot.mesh.position.copy(dot.pos);
+          }
+        }
+
+        /**
+         * Generates Lesson 4 concentric ring data on a flat horizontal layer.
+         */
+        generateRingData() {
+          const halfCount = NUM_DOTS / 2;
+          for (let i = 0; i < NUM_DOTS; i++) {
+            const dot = this.dots[i];
+            const angle =
+              ((i % halfCount) / halfCount) * Math.PI * 2 +
+              (Math.random() - 0.5) * 0.25;
+
+            if (dot.label === 1) {
+              // Red Group A: tight inner cluster
+              const r = 0.02 + Math.random() * 0.065;
+              dot.flatPos.set(Math.cos(angle) * r, -0.14, Math.sin(angle) * r);
+            } else {
+              // Blue Group B: outer ring around the red cluster
+              const r = 0.165 + Math.random() * 0.065;
+              dot.flatPos.set(Math.cos(angle) * r, -0.14, Math.sin(angle) * r);
+            }
+
+            dot.radiusSq =
+              dot.flatPos.x * dot.flatPos.x + dot.flatPos.z * dot.flatPos.z;
+            dot.pos.copy(dot.flatPos);
+            dot.mesh.position.copy(dot.pos);
+          }
+        }
+
+        /**
+         * Linear SVM solver using sub-gradient descent on hinge loss + L2 regularization.
+         * Normalizes (w, b) so the closest points satisfy |w·x + b| = 1.
+         */
+        trainSVM(steps = 2000, warmStart = false) {
+          const w = warmStart
+            ? this.svmW.clone()
+            : new THREE.Vector3(0.1, 0.1, 0.1);
+          let b = warmStart ? this.svmB : 0;
+
+          const lr0 = warmStart ? 0.08 : 0.25;
+          const lambda = 0.002; // Small L2 penalty for maximum margin
+
+          for (let step = 0; step < steps; step++) {
+            const lr = lr0 / (1 + step * 0.0015);
+            const gradW = w.clone().multiplyScalar(lambda);
+            let gradB = 0;
+
+            for (let i = 0; i < this.dots.length; i++) {
+              const dot = this.dots[i];
+              const y = dot.label;
+              const margin = y * (w.dot(dot.pos) + b);
+              if (margin < 1) {
+                gradW.addScaledVector(dot.pos, -y / this.dots.length);
+                gradB += -y / this.dots.length;
+              }
+            }
+
+            w.addScaledVector(gradW, -lr);
+            b -= lr * gradB;
+          }
+
+          // Fallback safety check if w is near zero
+          if (w.lengthSq() < 1e-6) {
+            w.set(0, 1, 0);
+          }
+
+          // Rescale w and b so that the closest points satisfy |w·x + b| = 1
+          let minAbsFunctionalMargin = Infinity;
+          for (let i = 0; i < this.dots.length; i++) {
+            const dot = this.dots[i];
+            const val = Math.abs(w.dot(dot.pos) + b);
+            if (val < minAbsFunctionalMargin) {
+              minAbsFunctionalMargin = val;
+            }
+          }
+
+          if (minAbsFunctionalMargin > 1e-5) {
+            w.divideScalar(minAbsFunctionalMargin);
+            b /= minAbsFunctionalMargin;
+          }
+
+          this.svmW.copy(w);
+          this.svmB = b;
+
+          // Flag support vectors: |w·x + b| <= 1.05
+          for (let i = 0; i < this.dots.length; i++) {
+            const dot = this.dots[i];
+            const functionalDist = Math.abs(
+              this.svmW.dot(dot.pos) + this.svmB
+            );
+            dot.isSupportVector = functionalDist <= 1.05;
+          }
+        }
+
+        /**
+         * Configures scene objects, UI panels, and interactions for Lesson 0..3.
+         */
+        applyLessonState(index, regenerateIfNeeded = false) {
+          const prevIndex = this.lessonIndex;
+          this.lessonIndex = index;
+          this.animatingBest = false;
+
+          const lesson = LESSONS[index];
+          this.lessonTitleText.text = lesson.title;
+          this.lessonBodyText.text = lesson.body;
+          this.tryThisText.text = lesson.tryThis;
+          this.lessonIndicatorText.text = `Lesson ${index + 1} of 4`;
+
+          this.backLessonBtn.disabled = index === 0;
+          this.nextLessonBtn.disabled = index === LESSONS.length - 1;
+
+          // Switch data layout when entering or leaving Lesson 4 (index 3)
+          if (index === 3) {
+            this.generateRingData();
+            this.liftAmount = 0;
+            this.liftSlider.value = 0;
+            this.liftValueText.text = '0%';
+          } else if (prevIndex === 3 || regenerateIfNeeded) {
+            this.generateSeparableData();
+            this.trainSVM(2000, false);
+          } else {
+            this.trainSVM(2000, false);
+          }
+
+          // Configure UI panel visibility per lesson
+          this.lesson2SlidersPanel.visible = index === 1;
+          this.lesson4LiftPanel.visible = index === 3;
+          this.liveMetricsPanel.visible = index === 1 || index === 2;
+          this.bestBtn.visible = index === 1 || index === 2;
+          this.newDataBtn.visible = index !== 3;
+
+          // Configure interaction modes per lesson
+          const allowDotDrag = index === 2;
+          for (const dot of this.dots) {
+            dot.mesh.xb.manipulation = allowDotDrag;
+            const showSV = index === 2 && dot.isSupportVector;
+            dot.ring.visible = showSV;
+            dot.badge.visible = showSV;
+          }
+
+          if (index === 0) {
+            // Lesson 1: clean view of separable clusters and optimal green boundary
+            this.boundaryMesh.visible = true;
+            this.boundaryMesh.xb.manipulation = false;
+            this.marginPlusMesh.visible = false;
+            this.marginMinusMesh.visible = false;
+
+            this.curW.copy(this.svmW);
+            this.curB = this.svmB;
+            this.updatePlanesFromHyperplane(this.curW, this.curB, true);
+          } else if (index === 1) {
+            // Lesson 2: start with a slightly tilted non-optimal plane so user can adjust
+            this.boundaryMesh.visible = true;
+            this.boundaryMesh.xb.manipulation = true;
+            this.marginPlusMesh.visible = true;
+            this.marginMinusMesh.visible = true;
+
+            this.manualTilt = 28;
+            this.manualTurn = -22;
+            this.manualSlide = 0.03;
+            this.syncSlidersFromAngles();
+            this.updatePlaneFromSliders();
+          } else if (index === 2) {
+            // Lesson 3: optimal SVM boundary + support vector rings + draggable dots
+            this.boundaryMesh.visible = true;
+            this.boundaryMesh.xb.manipulation = false;
+            this.marginPlusMesh.visible = true;
+            this.marginMinusMesh.visible = true;
+
+            this.curW.copy(this.svmW);
+            this.curB = this.svmB;
+            this.updatePlanesFromHyperplane(this.curW, this.curB, true);
+            this.updateLiveMetrics(this.curW, this.curB, true);
+          } else if (index === 3) {
+            // Lesson 4: flat ring data; boundary hidden until lifted
+            this.boundaryMesh.visible = false;
+            this.boundaryMesh.xb.manipulation = false;
+            this.marginPlusMesh.visible = false;
+            this.marginMinusMesh.visible = false;
+            this.updateKernelLift();
+          }
+        }
+
+        handleNewRandomData() {
+          if (this.lessonIndex === 3) return;
+          this.generateSeparableData();
+          this.trainSVM(2000, false);
+          if (this.lessonIndex === 1) {
+            this.updatePlaneFromSliders();
+          } else {
+            this.curW.copy(this.svmW);
+            this.curB = this.svmB;
+            this.updatePlanesFromHyperplane(this.curW, this.curB, true);
+            if (this.lessonIndex === 2) {
+              for (const dot of this.dots) {
+                dot.ring.visible = dot.isSupportVector;
+                dot.badge.visible = dot.isSupportVector;
+              }
+              this.updateLiveMetrics(this.curW, this.curB, true);
+            }
+          }
+        }
+
+        triggerBestBoundaryAnimation() {
+          if (this.lessonIndex === 3) {
+            // Smoothly lift to 100% in Lesson 4
+            this.liftAmount = 1;
+            this.liftSlider.value = 100;
+            this.liftValueText.text = '100%';
+            this.updateKernelLift();
+            return;
+          }
+          this.trainSVM(2000, false);
+          this.animStartW.copy(this.curW);
+          this.animStartB = this.curB;
+          this.animTargetW.copy(this.svmW);
+          this.animTargetB = this.svmB;
+          this.animTime = 0;
+          this.animatingBest = true;
+        }
+
+        syncSlidersFromAngles() {
+          this.syncingSliders = true;
+          this.tiltSlider.value = Math.round(this.manualTilt);
+          this.tiltValueText.text = `${Math.round(this.manualTilt)}°`;
+          this.turnSlider.value = Math.round(this.manualTurn);
+          this.turnValueText.text = `${Math.round(this.manualTurn)}°`;
+          const cm = Math.round(this.manualSlide * 100);
+          this.slideSlider.value = cm;
+          this.slideValueText.text = `${cm} cm`;
+          this.syncingSliders = false;
+        }
+
+        updatePlaneFromSliders() {
+          const euler = new THREE.Euler(
+            THREE.MathUtils.degToRad(this.manualTilt),
+            THREE.MathUtils.degToRad(this.manualTurn),
+            0,
+            'YXZ'
+          );
+          const normal = new THREE.Vector3(0, 1, 0).applyEuler(euler).normalize();
+          // Plane equation: normal · x + b = 0, where signed distance from origin is -b
+          this.curW.copy(normal);
+          this.curB = -this.manualSlide;
+          this.updatePlanesFromHyperplane(this.curW, this.curB, false);
+        }
+
+        /**
+         * Updates the boundary mesh and parallel gap meshes from (w, b).
+         * If useNormalizedSVM is true, |w| encodes the exact functional margin (gap = 2 / |w|).
+         * Otherwise, dynamically finds the closest dots on each side to draw the current gap.
+         */
+        updatePlanesFromHyperplane(w, b, useNormalizedSVM) {
+          const wLen = w.length();
+          if (wLen < 1e-6) return;
+
+          const unitNormal = w.clone().divideScalar(wLen);
+          const centerOffset = -b / wLen;
+
+          // Position & orient main boundary sheet
+          this.boundaryMesh.position
+            .copy(unitNormal)
+            .multiplyScalar(centerOffset);
+          this.boundaryMesh.quaternion.setFromUnitVectors(
+            new THREE.Vector3(0, 0, 1),
+            unitNormal
+          );
+
+          // Count misclassified dots and find geometric margin width
+          let wrongCount = 0;
+          let minSignedA = Infinity; // Group A (+1) wants w·x + b > 0
+          let maxSignedB = -Infinity; // Group B (-1) wants w·x + b < 0
+
+          for (let i = 0; i < this.dots.length; i++) {
+            const dot = this.dots[i];
+            const signedDist = unitNormal.dot(dot.pos) + b / wLen;
+            if (dot.label === 1) {
+              if (signedDist <= 0) wrongCount++;
+              if (signedDist < minSignedA) minSignedA = signedDist;
+            } else {
+              if (signedDist >= 0) wrongCount++;
+              if (signedDist > maxSignedB) maxSignedB = signedDist;
+            }
+          }
+
+          let halfGapMeters = 0;
+          if (useNormalizedSVM) {
+            halfGapMeters = 1 / wLen;
+          } else if (wrongCount === 0) {
+            halfGapMeters = Math.max(0, Math.min(minSignedA, -maxSignedB));
+          } else {
+            halfGapMeters = 0;
+          }
+
+          // Color boundary green when all dots are separated (N = 0), red otherwise
+          if (wrongCount === 0) {
+            this.boundaryMaterial.color.setHex(0x22c55e);
+            this.boundaryMaterial.emissive.setHex(0x15803d);
+            this.boundaryBorder.material.color.setHex(0x86efac);
+          } else {
+            this.boundaryMaterial.color.setHex(0xef4444);
+            this.boundaryMaterial.emissive.setHex(0x991b1b);
+            this.boundaryBorder.material.color.setHex(0xfca5a5);
+          }
+
+          // Update the two parallel gap sheets in Lesson 2 and Lesson 3
+          if (this.lessonIndex === 1 || this.lessonIndex === 2) {
+            const showMargins = wrongCount === 0 && halfGapMeters > 0.002;
+            this.marginPlusMesh.visible = showMargins;
+            this.marginMinusMesh.visible = showMargins;
+
+            if (showMargins) {
+              this.marginPlusMesh.position
+                .copy(unitNormal)
+                .multiplyScalar(centerOffset + halfGapMeters);
+              this.marginPlusMesh.quaternion.copy(this.boundaryMesh.quaternion);
+
+              this.marginMinusMesh.position
+                .copy(unitNormal)
+                .multiplyScalar(centerOffset - halfGapMeters);
+              this.marginMinusMesh.quaternion.copy(
+                this.boundaryMesh.quaternion
+              );
+            }
+          }
+
+          const gapCm = halfGapMeters * 2 * 100;
+          this.updateLiveMetrics(
+            w,
+            b,
+            useNormalizedSVM,
+            gapCm,
+            wrongCount
+          );
+        }
+
+        updateLiveMetrics(
+          w,
+          b,
+          isOptimal = false,
+          gapCm = (2 / w.length()) * 100,
+          wrongCount = 0
+        ) {
+          if (this.lessonIndex === 1) {
+            if (isOptimal && wrongCount === 0) {
+              this.liveMetricPrimary.text = `Widest possible gap: ${gapCm.toFixed(1)} cm`;
+              this.liveMetricPrimary.style.color = '#fde047';
+            } else {
+              this.liveMetricPrimary.text = `Gap width: ${gapCm.toFixed(1)} cm`;
+              this.liveMetricPrimary.style.color =
+                wrongCount === 0 ? '#86efac' : '#fca5a5';
+            }
+            this.liveMetricSecondary.text = `Dots on the wrong side: ${wrongCount}`;
+          } else if (this.lessonIndex === 2) {
+            const svCount = this.dots.filter((d) => d.isSupportVector).length;
+            this.liveMetricPrimary.text = `Widest gap: ${gapCm.toFixed(1)} cm`;
+            this.liveMetricPrimary.style.color = '#fde047';
+            this.liveMetricSecondary.text = `Active support vectors: ${svCount}`;
+          }
+        }
+
+        /**
+         * Lesson 4: Lifts each dot vertically by height proportional to r^2 = x^2 + z^2.
+         */
+        updateKernelLift() {
+          // Max radius squared in ring data is ~0.23^2 = 0.0529
+          // Scale factor lifts outer ring by up to 0.30 m when liftAmount = 1
+          const liftScale = 5.4;
+          let maxRedY = -Infinity;
+          let minBlueY = Infinity;
+
+          for (const dot of this.dots) {
+            const liftY = this.liftAmount * liftScale * dot.radiusSq;
+            dot.pos.set(
+              dot.flatPos.x,
+              dot.flatPos.y + liftY,
+              dot.flatPos.z
+            );
+            dot.pos.y = Math.min(0.24, dot.pos.y);
+            dot.mesh.position.copy(dot.pos);
+
+            if (dot.label === 1 && dot.pos.y > maxRedY) maxRedY = dot.pos.y;
+            if (dot.label === -1 && dot.pos.y < minBlueY) minBlueY = dot.pos.y;
+          }
+
+          // When lifted enough that blue ring clears the red cluster, reveal flat separating sheet
+          if (this.liftAmount >= 0.75 && minBlueY > maxRedY + 0.01) {
+            const midY = (maxRedY + minBlueY) / 2;
+            const halfGap = (minBlueY - maxRedY) / 2;
+
+            this.boundaryMesh.visible = true;
+            this.boundaryMesh.position.set(0, midY, 0);
+            this.boundaryMesh.quaternion.setFromEuler(
+              new THREE.Euler(-Math.PI / 2, 0, 0)
+            );
+            this.boundaryMaterial.color.setHex(0x22c55e);
+            this.boundaryMaterial.emissive.setHex(0x15803d);
+            this.boundaryBorder.material.color.setHex(0x86efac);
+
+            this.marginPlusMesh.visible = true;
+            this.marginPlusMesh.position.set(0, midY + halfGap, 0);
+            this.marginPlusMesh.quaternion.copy(this.boundaryMesh.quaternion);
+
+            this.marginMinusMesh.visible = true;
+            this.marginMinusMesh.position.set(0, midY - halfGap, 0);
+            this.marginMinusMesh.quaternion.copy(this.boundaryMesh.quaternion);
+          } else {
+            this.boundaryMesh.visible = false;
+            this.marginPlusMesh.visible = false;
+            this.marginMinusMesh.visible = false;
+          }
+        }
+
+        // --- INTERACTION & HOVER HIGHLIGHT CALLBACKS ---
+
+        onObjectSelectStart(event) {
+          const target = event.target;
+          if (!target) return;
+
+          if (target === this.boundaryMesh && this.lessonIndex === 1) {
+            this.grabbingBoundary = true;
+            this.animatingBest = false;
+            event.stopPropagation();
+          } else if (target.userData?.dotRecord && this.lessonIndex === 2) {
+            this.grabbedDot = target.userData.dotRecord;
+            event.stopPropagation();
+          }
+        }
+
+        onObjectSelectEnd(event) {
+          if (this.grabbingBoundary) {
+            this.grabbingBoundary = false;
+            event.stopPropagation();
+          }
+          if (this.grabbedDot) {
+            this.grabbedDot = null;
+            event.stopPropagation();
+          }
+        }
+
+        onObjectManipulate(event) {
+          const target = event.target;
+          if (target === this.boundaryMesh && this.lessonIndex === 1) {
+            // Read the user's hand-manipulated boundary orientation and position
+            this.boundaryMesh.position.clampScalar(-0.22, 0.22);
+            const normal = new THREE.Vector3(0, 0, 1)
+              .applyQuaternion(this.boundaryMesh.quaternion)
+              .normalize();
+            const offset = normal.dot(this.boundaryMesh.position);
+
+            this.curW.copy(normal);
+            this.curB = -offset;
+
+            // Keep sliders synchronized with direct hand manipulation
+            const euler = new THREE.Euler().setFromQuaternion(
+              this.boundaryMesh.quaternion,
+              'YXZ'
+            );
+            this.manualTilt = THREE.MathUtils.clamp(
+              THREE.MathUtils.radToDeg(euler.x) - 90,
+              -75,
+              75
+            );
+            this.manualTurn = THREE.MathUtils.clamp(
+              THREE.MathUtils.radToDeg(euler.y),
+              -90,
+              90
+            );
+            this.manualSlide = THREE.MathUtils.clamp(offset, -0.2, 0.2);
+            this.syncSlidersFromAngles();
+
+            this.updatePlanesFromHyperplane(this.curW, this.curB, false);
+            event.stopPropagation();
+          } else if (target?.userData?.dotRecord && this.lessonIndex === 2) {
+            const dot = target.userData.dotRecord;
+            dot.mesh.position.clampScalar(-0.24, 0.24);
+            dot.pos.copy(dot.mesh.position);
+
+            // Warm-start 200 gradient descent steps for real-time SVM update
+            this.trainSVM(200, true);
+            this.curW.copy(this.svmW);
+            this.curB = this.svmB;
+
+            for (const d of this.dots) {
+              d.ring.visible = d.isSupportVector;
+              d.badge.visible = d.isSupportVector;
+            }
+            this.updatePlanesFromHyperplane(this.curW, this.curB, true);
+            event.stopPropagation();
+          }
+        }
+
+        /**
+         * Updates hover highlight states for interactive 3D spheres and the boundary sheet,
+         * and advances smooth animations every frame.
+         */
+        update() {
+          const dt = xb.getDeltaTime();
+
+          // 1. Update hover highlights using XR Blocks user raycast intersection
+          this.updateHoverHighlight();
+
+          // 2. Smoothly animate boundary to optimal SVM solution when requested
+          if (this.animatingBest) {
+            this.animTime += dt;
+            const t = Math.min(1, this.animTime / this.animDuration);
+            // Smooth cubic ease-out
+            const ease = 1 - Math.pow(1 - t, 3);
+
+            this.curW.lerpVectors(this.animStartW, this.animTargetW, ease);
+            this.curB = THREE.MathUtils.lerp(
+              this.animStartB,
+              this.animTargetB,
+              ease
+            );
+
+            this.updatePlanesFromHyperplane(
+              this.curW,
+              this.curB,
+              t >= 1 // Once settled, display exact normalized margin
+            );
+
+            if (t >= 1) {
+              this.animatingBest = false;
+              this.curW.copy(this.svmW);
+              this.curB = this.svmB;
+              this.updatePlanesFromHyperplane(this.curW, this.curB, true);
+            }
+          }
+
+          // 3. Keep grabbed objects clamped inside the 0.6 m box even during continuous drag
+          if (this.grabbedDot && this.lessonIndex === 2) {
+            this.grabbedDot.mesh.position.clampScalar(-0.24, 0.24);
+            if (!this.grabbedDot.pos.equals(this.grabbedDot.mesh.position)) {
+              this.grabbedDot.pos.copy(this.grabbedDot.mesh.position);
+              this.trainSVM(200, true);
+              this.curW.copy(this.svmW);
+              this.curB = this.svmB;
+              for (const d of this.dots) {
+                d.ring.visible = d.isSupportVector;
+                d.badge.visible = d.isSupportVector;
+              }
+              this.updatePlanesFromHyperplane(this.curW, this.curB, true);
+            }
+          }
+
+          if (this.grabbingBoundary && this.lessonIndex === 1) {
+            this.boundaryMesh.position.clampScalar(-0.22, 0.22);
+            const normal = new THREE.Vector3(0, 0, 1)
+              .applyQuaternion(this.boundaryMesh.quaternion)
+              .normalize();
+            const offset = normal.dot(this.boundaryMesh.position);
+            this.curW.copy(normal);
+            this.curB = -offset;
+            this.updatePlanesFromHyperplane(this.curW, this.curB, false);
+          }
+        }
+
+        updateHoverHighlight() {
+          let nextHovered = null;
+          const user = xb.core?.user;
+          if (user && this.dataBox.visible) {
+            const candidates = [];
+            if (this.lessonIndex === 1 && this.boundaryMesh.visible) {
+              candidates.push(this.boundaryMesh);
+            }
+            if (this.lessonIndex === 2) {
+              for (const d of this.dots) candidates.push(d.mesh);
+            }
+
+            for (const obj of candidates) {
+              const hit = user.getIntersectionAt?.(obj);
+              if (hit) {
+                nextHovered = obj;
+                break;
+              }
+            }
+          }
+
+          if (nextHovered === this.hoveredObject) return;
+
+          // Clear previous hover highlight
+          if (this.hoveredObject) {
+            if (this.hoveredObject === this.boundaryMesh) {
+              this.boundaryMaterial.opacity = 0.48;
+              this.boundaryMaterial.emissiveIntensity = 0.35;
+            } else if (this.hoveredObject.userData?.dotRecord) {
+              const rec = this.hoveredObject.userData.dotRecord;
+              rec.mesh.scale.setScalar(1.0);
+              rec.mesh.material.emissive.setHex(rec.emissiveColor);
+              rec.mesh.material.emissiveIntensity = 0.35;
+            }
+          }
+
+          // Apply new hover highlight
+          this.hoveredObject = nextHovered;
+          if (this.hoveredObject) {
+            if (this.hoveredObject === this.boundaryMesh) {
+              this.boundaryMaterial.opacity = 0.72;
+              this.boundaryMaterial.emissiveIntensity = 0.75;
+            } else if (this.hoveredObject.userData?.dotRecord) {
+              const rec = this.hoveredObject.userData.dotRecord;
+              rec.mesh.scale.setScalar(1.32);
+              rec.mesh.material.emissive.setHex(0xffffff);
+              rec.mesh.material.emissiveIntensity = 0.55;
+            }
+          }
+        }
+
+        dispose() {
+          this.wireframeMesh?.geometry?.dispose();
+          this.wireframeMesh?.material?.dispose();
+          this.boundaryMesh?.geometry?.dispose();
+          this.boundaryMaterial?.dispose();
+          for (const d of this.dots) {
+            d.mesh.geometry.dispose();
+            d.mesh.material.dispose();
+            d.ring.geometry.dispose();
+            d.ring.material.dispose();
+          }
+        }
+      }
+
+      document.addEventListener('DOMContentLoaded', () => {
+        const options = new xb.Options();
+        options.setAppTitle('SVM Explorer');
+        options.setAppDescription(
+          'Learn how Support Vector Machines separate data in 3D mixed reality.'
+        );
+        options.enableHands();
+        options.hands.visualization = true;
+        options.enableReticles();
+
+        xb.add(new SVMExplorer());
+        xb.init(options);
+      });
+    </script>
+  </body>
+</html>
