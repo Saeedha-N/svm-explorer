@@ -22,9 +22,6 @@ An interactive WebXR mixed reality educational app built with [XR Blocks](https:
 | Android XR | Open the link in Chrome and press **Enter XR** |
 | Desktop | Open the link in Chrome to use the built-in simulator with a mouse |
 
-To run locally, serve the folder with any local static web server (required for ES modules and WebXR) and open it in Chrome:
-   ```bash
-   npx serve .
-   ```
+To run locally, serve the folder using with any local static web server (required for ES modules and WebXR) (e.g., `npx serve .` or `python -m http.server`) and open it in Chrome.
 
 The whole app is a single `index.html` file with no build step.
