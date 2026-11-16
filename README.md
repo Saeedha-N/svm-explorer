@@ -3,9 +3,15 @@
 An interactive WebXR mixed reality educational app built with [XR Blocks](https://xrblocks.github.io/) and Three.js that intuitively teaches the fundamentals of Support Vector Machines (SVMs) through hands-on 3D exploration.
 
 <p align="center">
-  <img src="assets/svm-explorer-quest3.webp" alt="SVM Explorer running on Meta Quest 3" width="400">
+  <img src="assets/ss.webp" alt="SVM Explorer running on Meta Quest 3" width="400">
   <br>
-  <em>SVM Explorer running in mixed reality on a Meta Quest 3</em>
+  <em>Screenshot of SVM Explorer running in mixed reality on a Meta Quest 3</em>
+</p>
+
+<p align="center">
+  <img src="assets/demo.gif" alt="SVM Explorer demo" width="600">
+  <br>
+  <em>Recording of SVM Explorer running in mixed reality on a Meta Quest 3</em>
 </p>
 
 **Try it**: https://saeedha-n.github.io/svm-explorer
@@ -21,6 +27,8 @@ An interactive WebXR mixed reality educational app built with [XR Blocks](https:
 - **Zero External ML Libraries:** Includes a custom sub-gradient descent linear SVM solver written in plain JavaScript.
 
 ## Running it
+
+For the best experience, open this app in a mixed reality headset!
 
 | Device | How |
 | --- | --- |
